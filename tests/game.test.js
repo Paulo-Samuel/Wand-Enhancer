@@ -54,10 +54,13 @@ test('primeira rodada começa obrigatoriamente com a carroça de sena', () => {
 
 test('classificação da batida', () => {
   assert.equal(classifyFinish([2, 5], [5, 4]), 'simples');
-  assert.equal(classifyFinish([2, 5], [5, 5]), 'carroca');
-  assert.equal(classifyFinish([2, 5], [2, 5]), 'laelo');
-  assert.equal(classifyFinish([3, 3], [3, 3]), 'cruzada');
+  assert.equal(classifyFinish([2, 5], [2, 5]), 'simples'); // pedra comum nas duas pontas vale 1
+  assert.equal(classifyFinish([2, 5], [5, 5]), 'bucha');
+  assert.equal(classifyFinish([3, 3], [3, 3]), 'gambuada');
   assert.equal(classifyFinish([3, 3], [3, 1]), 'simples');
+  assert.equal(POINTS.bucha, 2);
+  assert.equal(POINTS.gambuada, 4);
+  assert.equal(TARGET_SCORE, 4);
 });
 
 test('jogada inválida é recusada', () => {
@@ -78,7 +81,7 @@ test('pontas acompanham as pedras encaixadas', () => {
   match.roundNo = 1;
   match.round = {
     hands: [[[6, 6], [6, 2]], [[1, 1], [0, 0]], [[2, 4], [5, 5]], [[3, 3], [4, 4]]],
-    board: null, turn: 0, mustOpenWith: null, passed: [[], [], [], []], lastAction: null, result: null,
+    board: null, turn: 0, mustOpenWith: null, passed: [[], [], [], []], lastAction: null, result: null, seq: 0,
   };
   playMove(match, 0, { tile: [6, 6], side: 'center' });
   assert.deepEqual(boardEnds(match.round.board), [6, 6]);
@@ -92,7 +95,7 @@ test('batida pontua para a dupla e define quem começa a próxima', () => {
   match.round = {
     hands: [[[1, 2]], [[0, 0], [3, 3]], [[4, 4], [5, 5]], [[6, 6], [0, 1]]],
     board: { center: [2, 5], left: [], right: [] },
-    turn: 0, mustOpenWith: null, passed: [[], [], [], []], lastAction: null, result: null,
+    turn: 0, mustOpenWith: null, passed: [[], [], [], []], lastAction: null, result: null, seq: 0,
   };
   playMove(match, 0, { tile: [1, 2], side: 'left' });
   assert.equal(match.round.result.type, 'simples');
@@ -107,7 +110,7 @@ test('jogo trancado: dupla com menos pontos ganha', () => {
   match.round = {
     hands: [[[4, 0], [1, 1]], [[6, 6], [5, 5]], [[1, 2], [2, 2]], [[3, 3], [5, 6]]],
     board: { center: [0, 4], left: [], right: [] },
-    turn: 0, mustOpenWith: null, passed: [[], [], [], []], lastAction: null, result: null,
+    turn: 0, mustOpenWith: null, passed: [[], [], [], []], lastAction: null, result: null, seq: 0,
   };
   playMove(match, 0, { tile: [4, 0], side: 'right' });
   const res = match.round.result;

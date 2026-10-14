@@ -1,44 +1,40 @@
 import {
-  TARGET_SCORE,
   boardEnds,
-  canPlay,
-  createMatch,
+  legalMovesFor,
   handPips,
-  legalMoves,
-  passTurn,
-  playMove,
-  startRound,
   teamOf,
   tileId,
 } from './game.js';
-import { chooseMove } from './ai.js';
+import { BOT_NAMES, GameEngine } from './engine.js';
 import { boardSvg, singleTileSvg } from './board.js';
 
-const HUMAN = 0;
-const NAMES = ['Você', 'Beto', 'Lia', 'Duda'];
-const STORAGE_KEY = 'domino-dupla.match.v1';
-const SETTINGS_KEY = 'domino-dupla.settings.v1';
+const KEYS = {
+  match: 'domino-dupla.match.v2',
+  settings: 'domino-dupla.settings.v1',
+  name: 'domino-dupla.name',
+  id: 'domino-dupla.id',
+  keys: 'domino-dupla.keys',
+  session: 'domino-dupla.online.v1',
+  seenRules: 'domino-dupla.seen-rules',
+};
 const FINISH_LABEL = {
   simples: 'batida simples',
-  carroca: 'batida de carroça',
-  laelo: 'lá e lô',
-  cruzada: 'cruzada',
+  bucha: 'batida de bucha',
+  gambuada: 'gambuada',
   trancado: 'jogo trancado',
 };
 
 const $ = (sel) => document.querySelector(sel);
+const screens = { home: $('#home'), lobby: $('#lobby'), table: $('#app') };
 const boardEl = $('#board');
 const handEl = $('#hand');
 const statusEl = $('#status');
 const modal = $('#modal');
 const modalBody = $('#modal-body');
 
-let settings = { sound: true, speed: 'normal', level: 2, ...loadJson(SETTINGS_KEY) };
-let match = restoreMatch() ?? newMatch();
-let selectedId = null;
-let botTimer = null;
-const bubbles = new Map();
+const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
+// ---------- Armazenamento ----------
 function loadJson(key) {
   try {
     const raw = localStorage.getItem(key);
@@ -50,25 +46,39 @@ function loadJson(key) {
 
 function saveJson(key, value) {
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify(value));
   } catch {
     // Armazenamento indisponível (aba privada): o jogo segue sem salvar.
   }
 }
 
-function restoreMatch() {
-  const saved = loadJson(STORAGE_KEY);
-  if (!saved?.round?.hands || saved.round.hands.length !== 4) return null;
-  return saved;
-}
-
-function newMatch() {
-  const m = createMatch();
-  startRound(m);
-  return m;
-}
-
+const settings = { sound: true, speed: 'normal', level: 2, ...loadJson(KEYS.settings) };
+const saveSettings = () => saveJson(KEYS.settings, settings);
 const delay = () => (settings.speed === 'fast' ? 450 : 900);
+
+function deviceId() {
+  let id = loadJson(KEYS.id);
+  if (typeof id !== 'string') {
+    id = Array.from(crypto.getRandomValues(new Uint8Array(9)), (b) => b.toString(36).padStart(2, '0')).join('');
+    saveJson(KEYS.id, id);
+  }
+  return id;
+}
+
+// ---------- Estado da tela ----------
+// mode: 'home' | 'local' | 'online'
+let mode = 'home';
+let localEngine = null;
+let session = null;
+let selectedId = null;
+let lastActionKey = null;
+let resultShownFor = null;
+const bubbles = new Map();
+
+function show(name) {
+  for (const [key, el] of Object.entries(screens)) el.hidden = key !== name;
+}
 
 // ---------- Som ----------
 let audioCtx = null;
@@ -96,141 +106,380 @@ function clack() {
 }
 document.addEventListener('pointerdown', () => audioCtx?.resume?.(), { passive: true });
 
-// ---------- Fluxo ----------
-function commit() {
-  saveJson(STORAGE_KEY, match);
-  render();
-  schedule();
-}
-
-function showBubble(player, text) {
-  bubbles.set(player, text);
-  setTimeout(() => {
-    if (bubbles.get(player) === text) {
-      bubbles.delete(player);
-      renderSeats();
+// Mantém a tela acesa no jogo online (o celular derruba a conexão quando apaga).
+let wakeLock = null;
+async function keepAwake(on) {
+  try {
+    if (on && !wakeLock && 'wakeLock' in navigator && document.visibilityState === 'visible') {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } else if (!on && wakeLock) {
+      await wakeLock.release();
+      wakeLock = null;
     }
-  }, 1400);
-}
-
-function schedule() {
-  clearTimeout(botTimer);
-  const round = match.round;
-  if (!round) return;
-  if (round.result) {
-    botTimer = setTimeout(showRoundEnd, 700);
-    return;
+  } catch {
+    wakeLock = null;
   }
-
-  const player = round.turn;
-  if (player === HUMAN) {
-    if (!canPlay(round, HUMAN)) {
-      botTimer = setTimeout(() => {
-        passTurn(match, HUMAN);
-        showBubble(HUMAN, 'Passei');
-        commit();
-      }, delay() + 500);
-    }
-    return;
-  }
-
-  botTimer = setTimeout(() => {
-    const move = chooseMove(round, player, { level: settings.level });
-    if (move) {
-      playMove(match, player, move);
-      clack();
-    } else {
-      passTurn(match, player);
-      showBubble(player, 'Passo!');
-    }
-    commit();
-  }, delay());
 }
 
-function humanPlay(move) {
+// ---------- Controle comum ----------
+function currentView() {
+  if (mode === 'local') return localEngine?.view(0) ?? null;
+  if (mode === 'online') return session?.view() ?? null;
+  return null;
+}
+
+function sendPlay(move) {
+  const view = currentView();
   selectedId = null;
-  playMove(match, HUMAN, move);
-  clack();
-  commit();
+  if (mode === 'local') localEngine.play(0, move, view.seq);
+  else session.play(move, view.seq);
 }
 
-function onTileTap(id) {
-  const round = match.round;
-  if (!round || round.result || round.turn !== HUMAN) return;
-  const moves = legalMoves(round, HUMAN).filter((m) => tileId(m.tile) === id);
-  if (!moves.length) {
-    const el = handEl.querySelector(`[data-id="${id}"]`);
-    el?.classList.remove('shake');
-    void el?.offsetWidth;
-    el?.classList.add('shake');
+function sendNext(roundNo) {
+  if (mode === 'local') localEngine.next(roundNo);
+  else session.next(roundNo);
+}
+
+// ---------- Jogo local ----------
+function startLocal(resume) {
+  mode = 'local';
+  const name = myName();
+  const saved = resume ? loadJson(KEYS.match) : null;
+  const seats = [
+    { kind: 'human', name, online: true },
+    { kind: 'bot', name: BOT_NAMES[0], online: true },
+    { kind: 'bot', name: BOT_NAMES[1], online: true },
+    { kind: 'bot', name: BOT_NAMES[2], online: true },
+  ];
+  localEngine = new GameEngine({
+    match: saved?.round?.hands?.length === 4 ? saved : null,
+    seats,
+    botLevel: settings.level,
+    delay: delay(),
+    onChange: (engine) => {
+      saveJson(KEYS.match, engine.match);
+      renderGame();
+    },
+  });
+  resultShownFor = null;
+  lastActionKey = null;
+  show('table');
+  localEngine.begin();
+  if (!loadJson(KEYS.seenRules)) {
+    saveJson(KEYS.seenRules, true);
+    localEngine.pause();
+    showRules(() => localEngine.resume());
+  }
+}
+
+// ---------- Jogo online ----------
+let onlineModule = null;
+async function online() {
+  onlineModule ??= await import('./online.js');
+  return onlineModule;
+}
+
+async function startOnline(role, code = null) {
+  const net = await online();
+  if (!window.crypto?.subtle) {
+    homeMessage('O jogo online precisa do site em https.');
     return;
   }
-  if (moves.length === 1) {
-    humanPlay(moves[0]);
+  homeMessage(role === 'host' ? 'Criando sala…' : 'Entrando na sala…');
+  const keys = await net.loadOrCreateKeys({ get: () => loadJson(KEYS.keys), set: (v) => saveJson(KEYS.keys, v) });
+  const me = { id: deviceId(), name: myName() };
+  const saved = loadJson(KEYS.session);
+  const common = {
+    me,
+    keys,
+    onUpdate: () => renderOnline(),
+    onSave: (data) => saveJson(KEYS.session, data),
+  };
+
+  if (role === 'host') {
+    const resume = saved?.role === 'host' && (!code || saved.code === code) ? saved : null;
+    session = new net.HostSession({ ...common, saved: resume, delay: 900 });
+  } else {
+    session = new net.ClientSession({ ...common, code });
+  }
+
+  try {
+    await session.start();
+  } catch {
+    session = null;
+    homeMessage('Não consegui conectar ao servidor. Confira a internet e tente de novo.');
     return;
   }
-  selectedId = selectedId === id ? null : id;
-  render();
+  mode = 'online';
+  resultShownFor = null;
+  lastActionKey = null;
+  homeMessage('');
+  history.replaceState(null, '', `${location.pathname}${brokerQuery()}`);
+  renderOnline();
 }
 
-function onSidePick(side) {
-  const round = match.round;
-  if (!selectedId || round?.turn !== HUMAN) return;
-  const move = legalMoves(round, HUMAN).find((m) => tileId(m.tile) === selectedId && m.side === side);
-  if (move) humanPlay(move);
+function brokerQuery() {
+  const broker = new URLSearchParams(location.search).get('broker');
+  return broker ? `?broker=${encodeURIComponent(broker)}` : '';
 }
 
-// ---------- Desenho ----------
+function inviteLink(code) {
+  const params = new URLSearchParams(location.search);
+  params.set('sala', code);
+  return `${location.origin}${location.pathname}?${params}`;
+}
+
+function leaveOnline() {
+  session?.close();
+  session = null;
+  mode = 'home';
+  keepAwake(false);
+  closeModal();
+  showHome();
+}
+
+function renderOnline() {
+  if (mode !== 'online' || !session) return;
+  const status = session.status;
+  if (status === 'not-found' || status === 'closed') {
+    const msg = status === 'closed' ? 'A sala foi encerrada pelo anfitrião.' : 'Sala não encontrada. Confira o código.';
+    session.close();
+    session = null;
+    mode = 'home';
+    closeModal();
+    showHome(msg);
+    return;
+  }
+
+  const view = session.view();
+  if (view) {
+    keepAwake(true);
+    show('table');
+    renderGame();
+  } else {
+    if (resultShownFor !== null) closeModal();
+    show('lobby');
+    renderLobby();
+  }
+}
+
+function renderLobby() {
+  const lobby = session.lobby();
+  const seatCard = (i) => {
+    const s = lobby.seats[i];
+    let body;
+    let actions = '';
+    if (s.kind === 'human') {
+      body = `<b>${esc(s.name)}</b>${s.isMe ? ' <small>(você)</small>' : ''}${s.online ? '' : ' <small class="off">fora</small>'}`;
+      if (lobby.isHost && !s.isMe && lobby.phase === 'lobby') actions = `<button data-act="clear" data-seat="${i}">Tirar</button>`;
+    } else if (s.kind === 'bot') {
+      body = `🤖 <b>${esc(s.name)}</b> <small>robô</small>`;
+      if (lobby.phase === 'lobby') {
+        actions = `<button data-act="sit" data-seat="${i}">Sentar aqui</button>`;
+        if (lobby.isHost) actions += `<button data-act="clear" data-seat="${i}">Tirar</button>`;
+      }
+    } else {
+      body = '<span class="empty">Lugar vazio</span>';
+      if (lobby.phase === 'lobby') {
+        actions = `<button data-act="sit" data-seat="${i}">Sentar aqui</button>`;
+        if (lobby.isHost) actions += `<button data-act="bot" data-seat="${i}">+ Robô</button>`;
+      }
+    }
+    return `<div class="lobby-seat ${s.isMe ? 'is-me' : ''}"><span class="seat-no">Lugar ${i + 1}</span><div>${body}</div><div class="lobby-actions">${actions}</div></div>`;
+  };
+
+  const statusLine = {
+    connecting: 'Conectando…',
+    reconnecting: 'Sem conexão, tentando de novo…',
+    'host-offline': 'O anfitrião saiu do ar. Aguardando ele voltar…',
+    online: '',
+  }[session.status] ?? '';
+
+  let footer;
+  if (lobby.phase === 'game') {
+    footer = lobby.mySeat >= 0
+      ? '<p class="hint">Carregando a mesa…</p>'
+      : '<p class="hint">A partida já começou e os lugares estão ocupados.</p>';
+  } else if (lobby.isHost) {
+    footer = `<button class="big-btn primary" id="start-btn" ${lobby.canStart ? '' : 'disabled'}>Começar partida</button>
+      <p class="hint">${lobby.canStart ? 'Tudo pronto!' : lobby.mySeat < 0 ? 'Escolha um lugar para você.' : 'Preencha os lugares vazios com amigos ou robôs.'}</p>`;
+  } else {
+    footer = `<p class="hint">${lobby.mySeat < 0 ? 'Escolha um lugar.' : 'Aguardando o anfitrião começar…'}</p>`;
+  }
+
+  screens.lobby.innerHTML = `
+    <div class="lobby-head">
+      <p class="lobby-label">Sala</p>
+      <p class="lobby-code">${esc(lobby.code)}</p>
+      <button class="big-btn" id="invite-btn">📲 Convidar amigos</button>
+      ${statusLine ? `<p class="lobby-status">${statusLine}</p>` : ''}
+    </div>
+    <div class="lobby-teams">
+      <div class="lobby-team"><h3>Dupla 1</h3>${seatCard(0)}${seatCard(2)}</div>
+      <div class="lobby-team"><h3>Dupla 2</h3>${seatCard(1)}${seatCard(3)}</div>
+    </div>
+    <p class="hint small">Parceiros sentam frente a frente: lugares 1 e 3 contra 2 e 4.</p>
+    ${footer}
+    <button class="link-btn" id="leave-btn">${lobby.isHost ? 'Encerrar sala' : 'Sair da sala'}</button>`;
+
+  screens.lobby.querySelectorAll('[data-act]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const seat = Number(btn.dataset.seat);
+      if (btn.dataset.act === 'sit') session.sitMe(seat);
+      else if (btn.dataset.act === 'bot') session.addBot(seat);
+      else if (btn.dataset.act === 'clear') session.clearSeat(seat);
+    });
+  });
+  $('#start-btn')?.addEventListener('click', () => session.startGame());
+  $('#invite-btn').addEventListener('click', () => invite(lobby.code));
+  $('#leave-btn').addEventListener('click', () => {
+    if (lobby.isHost && !confirm('Encerrar a sala para todos?')) return;
+    leaveOnline();
+  });
+}
+
+async function invite(code) {
+  const url = inviteLink(code);
+  const text = `Bora jogar dominó em dupla? Entra na minha sala ${code}: ${url}`;
+  try {
+    if (navigator.share) {
+      await navigator.share({ title: 'Dominó em Dupla', text, url });
+      return;
+    }
+  } catch (err) {
+    if (err?.name === 'AbortError') return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    alert('Convite copiado! Cole no WhatsApp.');
+  } catch {
+    prompt('Copie o convite:', text);
+  }
+}
+
+// ---------- Mesa ----------
+const relOf = (view, seat) => (seat - view.seat + 4) % 4;
+const nameOf = (view, seat) => (seat === view.seat ? 'Você' : view.players[seat].name);
+
 function boardShape() {
   const rect = boardEl.getBoundingClientRect();
   const aspect = rect.width && rect.height ? rect.width / rect.height : 1;
-  const halfWidth = Math.max(6, Math.min(12, Math.round(5 + aspect * 2.2)));
+  // Mesa alta e estreita → fileiras curtas e mais pedras grandes.
+  const halfWidth = Math.max(5, Math.min(12, Math.round((1 + Math.sqrt(1 + 90 * aspect)) / 2)));
   return { aspect, halfWidth };
 }
 
-function renderBoard() {
-  const round = match.round;
-  const last = round.lastAction?.type === 'play' ? tileId(round.lastAction.tile) : null;
-  const anchors = selectedId && round.board ? ['left', 'right'] : null;
-  const svg = boardSvg(round.board, { ...boardShape(), freshId: last, anchors });
-  boardEl.innerHTML = round.board
-    ? svg
-    : `<div class="board-empty">${
-      round.mustOpenWith ? `Quem tem a carroça de sena <b>6|6</b> abre o jogo` : 'Mesa vazia'
-    }</div>`;
+function myLegalMoves(view) {
+  if (view.result || view.turn !== view.seat) return [];
+  return legalMovesFor(view.hand, view.board, view.mustOpenWith);
+}
+
+function noteNewAction(view) {
+  const key = `${view.roundNo}:${view.seq}`;
+  if (key === lastActionKey) return;
+  const first = lastActionKey === null;
+  lastActionKey = key;
+  selectedId = null;
+  const last = view.lastAction;
+  if (first || !last) return;
+  if (last.type === 'play') clack();
+  else {
+    const rel = relOf(view, last.player);
+    const text = rel === 0 ? 'Passei' : 'Passo!';
+    bubbles.set(rel, text);
+    setTimeout(() => {
+      if (bubbles.get(rel) === text) {
+        bubbles.delete(rel);
+        const v = currentView();
+        if (v) renderSeats(v);
+      }
+    }, 1400);
+  }
+}
+
+function renderGame() {
+  const view = currentView();
+  if (!view) return;
+  noteNewAction(view);
+
+  const myTeam = teamOf(view.seat);
+  $('#score-us').textContent = view.scores[myTeam];
+  $('#score-them').textContent = view.scores[1 - myTeam];
+  $('#round-tag').textContent = `Rodada ${view.roundNo} · até ${view.target}`;
+
+  const banner = $('#net-banner');
+  const netText = mode === 'online' ? {
+    reconnecting: 'Sem conexão, tentando de novo…',
+    'host-offline': 'O anfitrião saiu do ar. Aguardando…',
+  }[session.status] : null;
+  banner.hidden = !netText;
+  banner.textContent = netText ?? '';
+
+  renderSeats(view);
+  renderBoard(view);
+  renderHand(view);
+  renderStatus(view);
+
+  if (view.result) {
+    const key = `${view.roundNo}`;
+    if (resultShownFor !== key) {
+      resultShownFor = key;
+      setTimeout(() => {
+        const v = currentView();
+        if (v?.result && `${v.roundNo}` === key) showRoundEnd(v);
+      }, 700);
+    }
+  } else if (resultShownFor !== null) {
+    resultShownFor = null;
+    closeModal();
+  }
+}
+
+function renderBoard(view) {
+  const last = view.lastAction?.type === 'play' ? tileId(view.lastAction.tile) : null;
+  const anchors = selectedId && view.board ? ['left', 'right'] : null;
+  if (!view.board) {
+    const opener = view.mustOpenWith ? 'Quem tem a bucha de sena <b>6|6</b> abre o jogo' : 'Mesa vazia';
+    boardEl.innerHTML = `<div class="board-empty">${opener}</div>`;
+    return;
+  }
+  boardEl.innerHTML = boardSvg(view.board, { ...boardShape(), freshId: last, anchors });
   boardEl.querySelectorAll('.anchor').forEach((el) => {
     el.addEventListener('click', () => onSidePick(el.dataset.side));
   });
 }
 
-function renderSeats() {
-  const round = match.round;
-  document.querySelectorAll('.seat').forEach((seat) => {
-    const p = Number(seat.dataset.player);
-    const count = round.hands[p].length;
+function renderSeats(view) {
+  document.querySelectorAll('.seat').forEach((seatEl) => {
+    const rel = Number(seatEl.dataset.rel);
+    const seat = (view.seat + rel) % 4;
+    const player = view.players[seat];
+    const count = view.counts[seat];
     const backs = Array.from({ length: count }, () => '<span class="back"></span>').join('');
-    const bubble = bubbles.get(p);
-    seat.className = seat.className.replace(/\s?(active|team-us|team-them)/g, '');
-    seat.classList.add(teamOf(p) === 0 ? 'team-us' : 'team-them');
-    if (round.turn === p && !round.result) seat.classList.add('active');
-    seat.innerHTML = `
+    const bubble = bubbles.get(rel);
+    const tag = rel === 2 ? 'sua dupla' : mode === 'online' && player.kind === 'bot' ? 'robô' : '';
+    seatEl.classList.toggle('team-us', teamOf(seat) === teamOf(view.seat));
+    seatEl.classList.toggle('team-them', teamOf(seat) !== teamOf(view.seat));
+    seatEl.classList.toggle('active', view.turn === seat && !view.result);
+    seatEl.classList.toggle('away', !player.online);
+    seatEl.innerHTML = `
       <div class="seat-head">
-        <span class="avatar">${NAMES[p][0]}</span>
-        <span class="seat-name">${NAMES[p]}${p === 2 ? ' <small>parceira</small>' : ''}</span>
+        <span class="avatar">${esc([...player.name][0] ?? '?')}</span>
+        <span class="seat-name">${esc(player.name)}${tag ? ` <small>${tag}</small>` : ''}${player.online ? '' : ' <small class="off">fora</small>'}</span>
         <span class="seat-count">${count}</span>
       </div>
       <div class="backs">${backs}</div>
       ${bubble ? `<div class="bubble">${bubble}</div>` : ''}`;
   });
-  const meBubble = bubbles.get(HUMAN);
-  document.querySelector('.me').dataset.bubble = meBubble ?? '';
+  document.querySelector('.me').dataset.bubble = bubbles.get(0) ?? '';
 }
 
-function renderHand() {
-  const round = match.round;
-  const myTurn = round.turn === HUMAN && !round.result;
-  const playable = new Set(myTurn ? legalMoves(round, HUMAN).map((m) => tileId(m.tile)) : []);
-  handEl.innerHTML = round.hands[HUMAN]
+function renderHand(view) {
+  const moves = myLegalMoves(view);
+  const myTurn = view.turn === view.seat && !view.result;
+  const playable = new Set(moves.map((m) => tileId(m.tile)));
+  handEl.innerHTML = view.hand
     .map((tile) => {
       const id = tileId(tile);
       const cls = [
@@ -246,28 +495,28 @@ function renderHand() {
   });
 }
 
-function renderStatus() {
-  const round = match.round;
+function renderStatus(view) {
   let text = '';
-  if (round.result) {
+  if (view.result) {
     text = 'Fim da rodada';
-  } else if (round.turn === HUMAN) {
-    if (!canPlay(round, HUMAN)) text = 'Sem pedra para jogar… você passa';
+  } else if (view.turn === view.seat) {
+    if (!myLegalMoves(view).length) text = 'Sem pedra para jogar… você passa';
     else if (selectedId) {
-      const [l, r] = boardEnds(round.board);
+      const [l, r] = boardEnds(view.board);
       text = `Escolha a ponta:
         <button class="side-btn" data-side="left">◀ ponta ${l}</button>
         <button class="side-btn" data-side="right">ponta ${r} ▶</button>`;
-    } else if (!round.board && round.mustOpenWith) text = 'Sua vez: abra com a carroça 6|6';
+    } else if (!view.board && view.mustOpenWith) text = 'Sua vez: abra com a bucha de sena 6|6';
     else text = 'Sua vez';
   } else {
-    const last = round.lastAction;
-    const lastText = last
-      ? last.type === 'pass'
-        ? `${NAMES[last.player]} passou · `
-        : `${NAMES[last.player]} jogou ${last.tile[0]}|${last.tile[1]} · `
-      : '';
-    text = `${lastText}vez de ${NAMES[round.turn]}…`;
+    const last = view.lastAction;
+    let lastText = '';
+    if (last) {
+      lastText = last.type === 'pass'
+        ? `${esc(nameOf(view, last.player))} passou · `
+        : `${esc(nameOf(view, last.player))} jogou ${last.tile[0]}|${last.tile[1]} · `;
+    }
+    text = `${lastText}vez de ${esc(nameOf(view, view.turn))}…`;
   }
   statusEl.innerHTML = text;
   statusEl.querySelectorAll('.side-btn').forEach((el) => {
@@ -275,14 +524,30 @@ function renderStatus() {
   });
 }
 
-function render() {
-  $('#score-us').textContent = match.scores[0];
-  $('#score-them').textContent = match.scores[1];
-  $('#round-tag').textContent = `Rodada ${match.roundNo} · até ${TARGET_SCORE}`;
-  renderSeats();
-  renderBoard();
-  renderHand();
-  renderStatus();
+function onTileTap(id) {
+  const view = currentView();
+  if (!view) return;
+  const moves = myLegalMoves(view).filter((m) => tileId(m.tile) === id);
+  if (!moves.length) {
+    const el = handEl.querySelector(`[data-id="${id}"]`);
+    el?.classList.remove('shake');
+    void el?.offsetWidth;
+    el?.classList.add('shake');
+    return;
+  }
+  if (moves.length === 1) {
+    sendPlay(moves[0]);
+    return;
+  }
+  selectedId = selectedId === id ? null : id;
+  renderGame();
+}
+
+function onSidePick(side) {
+  const view = currentView();
+  if (!view || !selectedId) return;
+  const move = myLegalMoves(view).find((m) => tileId(m.tile) === selectedId && m.side === side);
+  if (move) sendPlay(move);
 }
 
 // ---------- Janelas ----------
@@ -301,36 +566,38 @@ function miniHand(hand) {
   return hand.map((t) => `<span class="mini-tile">${singleTileSvg(t, false)}</span>`).join('');
 }
 
-function showRoundEnd() {
-  const round = match.round;
-  const res = round.result;
-  if (!res) return;
+function showRoundEnd(view) {
+  const res = view.result;
+  const myTeam = teamOf(view.seat);
+  const usWon = res.team === myTeam;
+  const teamWord = (team) => (team === myTeam ? 'Nós' : 'Eles');
 
   let title;
   if (res.type === 'trancado') {
-    title = res.team === null
-      ? 'Jogo trancado — empate!'
-      : `Jogo trancado — ${res.team === 0 ? 'nós' : 'eles'} com menos pontos`;
+    title = res.team === null ? 'Jogo trancado — empate!' : `Jogo trancado — ${usWon ? 'nós' : 'eles'} com menos pontos`;
+  } else if (res.player === view.seat) {
+    title = `Você bateu! (${FINISH_LABEL[res.type]})`;
   } else {
-    title = res.player === HUMAN ? `Você bateu! (${FINISH_LABEL[res.type]})` : `${NAMES[res.player]} bateu — ${FINISH_LABEL[res.type]}`;
+    title = `${esc(nameOf(view, res.player))} bateu — ${FINISH_LABEL[res.type]}`;
   }
   const gain = res.team === null
     ? 'Ninguém pontua.'
-    : `<b class="${res.team === 0 ? 'us-text' : 'them-text'}">+${res.points} ${res.points > 1 ? 'pontos' : 'ponto'}</b> para ${res.team === 0 ? 'Nós' : 'Eles'}`;
+    : `<b class="${usWon ? 'us-text' : 'them-text'}">+${res.points} ${res.points > 1 ? 'pontos' : 'ponto'}</b> para ${teamWord(res.team)}`;
   const pipsLine = res.type === 'trancado'
-    ? `<p class="small">Pontos na mão: Nós ${res.teamPips[0]} · Eles ${res.teamPips[1]}</p>`
+    ? `<p class="small">Pontos na mão: Nós ${res.teamPips[myTeam]} · Eles ${res.teamPips[1 - myTeam]}</p>`
     : '';
 
-  const hands = [0, 1, 2, 3]
-    .map((p) => `<div class="reveal-row ${teamOf(p) === 0 ? 'team-us' : 'team-them'}">
-      <span class="reveal-name">${NAMES[p]} <small>${handPips(round.hands[p])}</small></span>
-      <span class="reveal-tiles">${miniHand(round.hands[p])}</span>
+  const order = [0, 1, 2, 3].map((rel) => (view.seat + rel) % 4);
+  const hands = order
+    .map((p) => `<div class="reveal-row ${teamOf(p) === myTeam ? 'team-us' : 'team-them'}">
+      <span class="reveal-name">${esc(nameOf(view, p))} <small>${handPips(res.hands[p])}</small></span>
+      <span class="reveal-tiles">${miniHand(res.hands[p])}</span>
     </div>`)
     .join('');
 
-  const over = match.winner !== null;
+  const over = view.winner !== null;
   const overHtml = over
-    ? `<h2 class="${match.winner === 0 ? 'us-text' : 'them-text'}">${match.winner === 0 ? 'Vocês venceram a partida! 🎉' : 'Eles venceram a partida'}</h2>`
+    ? `<h2 class="${view.winner === myTeam ? 'us-text' : 'them-text'}">${view.winner === myTeam ? 'Vocês venceram a partida! 🎉' : 'Eles venceram a partida'}</h2>`
     : '';
 
   openModal(`
@@ -339,94 +606,206 @@ function showRoundEnd() {
     <p>${gain}</p>
     ${pipsLine}
     <div class="reveal">${hands}</div>
-    <p class="final-score">Nós <b>${match.scores[0]}</b> × <b>${match.scores[1]}</b> Eles</p>
+    <p class="final-score">Nós <b>${view.scores[myTeam]}</b> × <b>${view.scores[1 - myTeam]}</b> Eles</p>
     <button class="primary" id="next-btn">${over ? 'Nova partida' : 'Próxima rodada'}</button>
   `, () => {
-    $('#next-btn').addEventListener('click', () => {
-      closeModal();
-      if (over) match = newMatch();
-      else startRound(match);
-      selectedId = null;
-      commit();
+    $('#next-btn').addEventListener('click', (e) => {
+      e.currentTarget.disabled = true;
+      e.currentTarget.textContent = 'Aguardando…';
+      sendNext(view.roundNo);
     });
   });
 }
 
 function showMenu() {
+  const isLocal = mode === 'local';
+  const isHost = mode === 'online' && session?.role === 'host';
+  if (isLocal) localEngine.pause();
+
+  const resumeGame = () => {
+    closeModal();
+    if (isLocal) localEngine.resume();
+    const view = currentView();
+    if (view?.result) {
+      resultShownFor = null;
+      renderGame();
+    }
+  };
+
   openModal(`
     <h3>Menu</h3>
     <div class="menu-list">
       <label class="toggle"><span>Som</span><input type="checkbox" id="opt-sound" ${settings.sound ? 'checked' : ''}></label>
+      ${isLocal ? `
       <label class="toggle"><span>Jogadas rápidas</span><input type="checkbox" id="opt-fast" ${settings.speed === 'fast' ? 'checked' : ''}></label>
-      <label class="toggle"><span>Adversários espertos</span><input type="checkbox" id="opt-level" ${settings.level >= 2 ? 'checked' : ''}></label>
+      <label class="toggle"><span>Adversários espertos</span><input type="checkbox" id="opt-level" ${settings.level >= 2 ? 'checked' : ''}></label>` : `
+      <p class="small">Sala <b>${esc(session.code)}</b></p>
+      <button id="invite-menu-btn">📲 Convidar</button>`}
       <button id="rules-btn">Regras</button>
-      <button id="new-btn" class="danger">Nova partida</button>
+      ${isLocal ? '<button id="new-btn" class="danger">Nova partida</button>' : ''}
+      <button id="exit-btn" class="danger">${isLocal ? 'Sair para o início' : isHost ? 'Encerrar sala' : 'Sair da sala'}</button>
       <button id="close-btn" class="primary">Voltar ao jogo</button>
     </div>
   `, () => {
-    const persist = () => saveJson(SETTINGS_KEY, settings);
-    $('#opt-sound').addEventListener('change', (e) => { settings.sound = e.target.checked; persist(); });
-    $('#opt-fast').addEventListener('change', (e) => { settings.speed = e.target.checked ? 'fast' : 'normal'; persist(); });
-    $('#opt-level').addEventListener('change', (e) => { settings.level = e.target.checked ? 2 : 1; persist(); });
-    $('#rules-btn').addEventListener('click', showRules);
-    $('#close-btn').addEventListener('click', () => { closeModal(); schedule(); });
-    $('#new-btn').addEventListener('click', () => {
+    $('#opt-sound').addEventListener('change', (e) => { settings.sound = e.target.checked; saveSettings(); });
+    $('#opt-fast')?.addEventListener('change', (e) => {
+      settings.speed = e.target.checked ? 'fast' : 'normal';
+      localEngine.delay = delay();
+      saveSettings();
+    });
+    $('#opt-level')?.addEventListener('change', (e) => {
+      settings.level = e.target.checked ? 2 : 1;
+      localEngine.botLevel = settings.level;
+      saveSettings();
+    });
+    $('#invite-menu-btn')?.addEventListener('click', () => invite(session.code));
+    $('#rules-btn').addEventListener('click', () => showRules(resumeGame));
+    $('#close-btn').addEventListener('click', resumeGame);
+    $('#new-btn')?.addEventListener('click', () => {
       if (!confirm('Começar uma nova partida? O placar atual será perdido.')) return;
       closeModal();
-      match = newMatch();
-      selectedId = null;
-      commit();
+      saveJson(KEYS.match, null);
+      startLocal(false);
+    });
+    $('#exit-btn').addEventListener('click', () => {
+      if (isLocal) {
+        closeModal();
+        localEngine.pause();
+        localEngine = null;
+        mode = 'home';
+        showHome();
+        return;
+      }
+      if (isHost && !confirm('Encerrar a sala para todos?')) return;
+      leaveOnline();
     });
   });
 }
 
-function showRules() {
+function showRules(onClose) {
   openModal(`
     <h3>Como jogar</h3>
     <div class="rules">
-      <p>Quatro jogadores em duas duplas: <b class="us-text">você e a Lia</b> (sentada à sua frente) contra <b class="them-text">Beto e Duda</b>. Cada um recebe 7 pedras e não há monte.</p>
-      <p>A primeira rodada começa com quem tem a <b>carroça de sena (6|6)</b>. Nas seguintes, quem venceu a rodada anterior começa com qualquer pedra. A vez passa no sentido anti-horário.</p>
+      <p>Quatro jogadores em duas duplas. Seu parceiro senta à sua frente. Cada um recebe 7 pedras e não há monte.</p>
+      <p>A primeira rodada começa com quem tem a <b>bucha de sena (6|6)</b>. Nas seguintes, quem venceu a rodada anterior começa com qualquer pedra. A vez passa para quem está à sua direita.</p>
       <p>Na sua vez, encaixe uma pedra numa das pontas. Sem pedra que sirva, você passa.</p>
-      <p><b>Pontuação</b> de quem bate (fica sem pedras):</p>
+      <p><b>Pontos</b> de quem bate (fica sem pedras):</p>
       <ul>
         <li>Batida simples — 1 ponto</li>
-        <li>Carroça (bater com uma pedra dobrada) — 2 pontos</li>
-        <li>Lá e lô (a última pedra serve nas duas pontas) — 3 pontos</li>
-        <li>Cruzada (carroça que serve nas duas pontas) — 4 pontos</li>
+        <li>De bucha (bater com pedra dobrada) — 2 pontos</li>
+        <li>Gambuada (bucha que serve nas duas pontas) — 4 pontos</li>
       </ul>
       <p><b>Jogo trancado:</b> se ninguém consegue jogar, somam-se os pontos das pedras de cada dupla e quem tiver menos ganha 1 ponto. Empate não pontua.</p>
-      <p>Vence a partida a primeira dupla a fazer <b>${TARGET_SCORE} pontos</b>.</p>
+      <p>Vence a dupla que fizer <b>4 pontos</b> primeiro.</p>
       <p class="small">Toque numa pedra para jogar. Se ela servir nas duas pontas, escolha o lado nas setas da mesa ou nos botões.</p>
     </div>
     <button class="primary" id="back-btn">Entendi</button>
   `, () => {
-    $('#back-btn').addEventListener('click', () => { closeModal(); schedule(); });
+    $('#back-btn').addEventListener('click', () => {
+      closeModal();
+      onClose?.();
+    });
   });
 }
 
 modal.addEventListener('cancel', (e) => {
-  // Fim de rodada precisa do botão; o resto fecha normalmente.
-  if (match.round?.result) e.preventDefault();
+  // O fim de rodada precisa do botão; o resto fecha normalmente.
+  if (currentView()?.result) e.preventDefault();
 });
 
-$('#menu-btn').addEventListener('click', () => {
-  clearTimeout(botTimer);
-  showMenu();
+// ---------- Início ----------
+function myName() {
+  const input = $('#name-input');
+  const name = input.value.replace(/\s+/g, ' ').trim().slice(0, 14);
+  if (name) saveJson(KEYS.name, name);
+  return name || 'Você';
+}
+
+function homeMessage(text) {
+  $('#home-msg').textContent = text;
+}
+
+function showHome(message = '') {
+  show('home');
+  homeMessage(message);
+  $('#name-input').value = loadJson(KEYS.name) ?? '';
+
+  const saved = loadJson(KEYS.session);
+  const resumeBtn = $('#resume-btn');
+  const localSaved = loadJson(KEYS.match);
+  if (saved?.code) {
+    resumeBtn.hidden = false;
+    resumeBtn.textContent = `↩ Voltar para a sala ${saved.code}`;
+    resumeBtn.onclick = () => startOnline(saved.role, saved.code);
+  } else if (localSaved?.round && localSaved.winner === null) {
+    resumeBtn.hidden = false;
+    resumeBtn.textContent = '↩ Continuar partida contra o computador';
+    resumeBtn.onclick = () => startLocal(true);
+  } else {
+    resumeBtn.hidden = true;
+  }
+}
+
+function requireName() {
+  const input = $('#name-input');
+  if (input.value.trim()) return true;
+  homeMessage('Escreva seu nome para jogar online.');
+  input.focus();
+  return false;
+}
+
+$('#local-btn').addEventListener('click', () => {
+  saveJson(KEYS.match, null);
+  startLocal(false);
 });
+$('#host-btn').addEventListener('click', () => {
+  if (!requireName()) return;
+  saveJson(KEYS.session, null);
+  startOnline('host');
+});
+$('#join-btn').addEventListener('click', async () => {
+  if (!requireName()) return;
+  const net = await online();
+  const code = net.normalizeCode($('#code-input').value);
+  if (!code) {
+    homeMessage('Código inválido: são 5 letras/números.');
+    return;
+  }
+  startOnline('client', code);
+});
+$('#name-input').addEventListener('input', () => myName());
+$('#code-input').addEventListener('input', (e) => {
+  e.target.value = e.target.value.toUpperCase();
+});
+$('#home-rules-btn').addEventListener('click', () => showRules());
+$('#menu-btn').addEventListener('click', showMenu);
 
 let resizeTimer = null;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(renderBoard, 120);
+  resizeTimer = setTimeout(() => {
+    const view = currentView();
+    if (view) renderBoard(view);
+  }, 120);
+});
+
+document.addEventListener('visibilitychange', () => {
+  const visible = document.visibilityState === 'visible';
+  if (mode === 'online') {
+    session?.setPaused?.(!visible);
+    if (visible) keepAwake(true);
+  }
 });
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
-render();
-if (match.round.result) showRoundEnd();
-else if (match.roundNo === 1 && !match.round.board && !loadJson('domino-dupla.seen-rules')) {
-  saveJson('domino-dupla.seen-rules', true);
-  showRules();
-} else schedule();
+// Link de convite: ?sala=CODIGO
+const invited = new URLSearchParams(location.search).get('sala');
+showHome();
+if (invited) {
+  $('#code-input').value = invited.toUpperCase().slice(0, 5);
+  if ($('#name-input').value.trim()) $('#join-btn').click();
+  else homeMessage('Escreva seu nome e toque em Entrar.');
+}

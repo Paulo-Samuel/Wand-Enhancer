@@ -1,16 +1,15 @@
 // Regras do dominó em dupla (estilo brasileiro, 4 jogadores, sem monte).
 // Este módulo é puro: não toca em DOM nem em armazenamento.
 
-export const TARGET_SCORE = 6;
+export const TARGET_SCORE = 4;
 export const PLAYER_COUNT = 4;
 export const HAND_SIZE = 7;
 export const TOTAL_PIPS = 168;
 
 export const POINTS = {
   simples: 1,
-  carroca: 2,
-  laelo: 3,
-  cruzada: 4,
+  bucha: 2,
+  gambuada: 4,
   trancado: 1,
 };
 
@@ -49,7 +48,7 @@ export function createMatch() {
   return {
     scores: [0, 0],
     roundNo: 0,
-    // null = a primeira rodada começa com quem tiver a carroça de sena (6-6).
+    // null = a primeira rodada começa com quem tiver a bucha de sena (6-6).
     starter: null,
     round: null,
     winner: null,
@@ -79,6 +78,8 @@ export function startRound(match, rng = Math.random) {
     passed: [[], [], [], []],
     lastAction: null,
     result: null,
+    // Conta as ações da rodada; a interface usa para saber o que é novidade.
+    seq: 0,
   };
   return match;
 }
@@ -96,14 +97,17 @@ export function boardTiles(board) {
 }
 
 export function legalMoves(round, player) {
-  const hand = round.hands[player];
-  if (!round.board) {
+  return legalMovesFor(round.hands[player], round.board, round.mustOpenWith);
+}
+
+export function legalMovesFor(hand, board, mustOpenWith = null) {
+  if (!board) {
     return hand
-      .filter((tile) => !round.mustOpenWith || tileId(tile) === round.mustOpenWith)
+      .filter((tile) => !mustOpenWith || tileId(tile) === mustOpenWith)
       .map((tile) => ({ tile, side: 'center' }));
   }
 
-  const [left, right] = boardEnds(round.board);
+  const [left, right] = boardEnds(board);
   const moves = [];
   for (const tile of hand) {
     const fitsLeft = tile.includes(left);
@@ -111,7 +115,7 @@ export function legalMoves(round, player) {
     if (left === right) {
       // As duas pontas são iguais: o lado não muda o jogo, só o desenho da mesa.
       if (fitsLeft) {
-        const side = round.board.left.length < round.board.right.length ? 'left' : 'right';
+        const side = board.left.length < board.right.length ? 'left' : 'right';
         moves.push({ tile, side });
       }
       continue;
@@ -135,14 +139,12 @@ function placeTile(board, tile, side) {
   return board;
 }
 
-// Classifica a batida a partir das pontas ANTES da última pedra.
+// Classifica a batida a partir das pontas ANTES da última pedra:
+// bucha (pedra dobrada) vale 2; bucha que serve nas duas pontas é gambuada.
 export function classifyFinish(ends, tile) {
-  if (!ends) return 'simples';
+  if (!ends || !isDouble(tile)) return 'simples';
   const [left, right] = ends;
-  const fitsBoth = tile.includes(left) && tile.includes(right);
-  if (isDouble(tile)) return fitsBoth ? 'cruzada' : 'carroca';
-  if (fitsBoth && left !== right) return 'laelo';
-  return 'simples';
+  return tile[0] === left && tile[0] === right ? 'gambuada' : 'bucha';
 }
 
 function isBlocked(round) {
@@ -171,6 +173,7 @@ export function playMove(match, player, move) {
   round.board = placeTile(round.board, tile, move.side);
   round.mustOpenWith = null;
   round.lastAction = { player, type: 'play', tile: tile.slice(), side: move.side };
+  round.seq += 1;
 
   if (hand.length === 0) {
     finishRound(match, {
@@ -201,6 +204,7 @@ export function passTurn(match, player) {
     if (!round.passed[player].includes(end)) round.passed[player].push(end);
   }
   round.lastAction = { player, type: 'pass' };
+  round.seq += 1;
   round.turn = nextPlayer(player);
   return match;
 }

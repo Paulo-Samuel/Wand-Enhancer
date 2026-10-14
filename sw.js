@@ -1,5 +1,5 @@
 // Cache do app para jogar offline. Aumente a versão a cada mudança nos arquivos.
-const CACHE = 'domino-dupla-v1';
+const CACHE = 'domino-dupla-v2';
 const ASSETS = [
   './',
   'index.html',
@@ -9,6 +9,9 @@ const ASSETS = [
   'js/game.js',
   'js/ai.js',
   'js/board.js',
+  'js/engine.js',
+  'js/online.js',
+  'js/mqtt-lite.js',
   'icons/icon.svg',
   'icons/apple-touch-icon.png',
   'icons/icon-192.png',

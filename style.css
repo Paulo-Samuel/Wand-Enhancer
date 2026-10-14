@@ -37,6 +37,91 @@ html, body {
 
 button { font: inherit; color: inherit; cursor: pointer; touch-action: manipulation; }
 
+[hidden] { display: none !important; }
+
+.screen { min-height: 100dvh; }
+
+/* ---------- Início e sala ---------- */
+.home, .lobby {
+  height: 100dvh;
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 12px;
+  max-width: 440px; margin: 0 auto;
+  padding: calc(var(--safe-top) + 24px) calc(var(--safe-right) + 20px) calc(var(--safe-bottom) + 20px) calc(var(--safe-left) + 20px);
+  -webkit-user-select: text; user-select: text;
+}
+body:has(.home:not([hidden])), body:has(.lobby:not([hidden])) {
+  background: radial-gradient(ellipse at 50% 30%, var(--felt-light) 0%, var(--felt) 50%, var(--felt-dark) 100%);
+}
+.home-logo { text-align: center; margin-bottom: 8px; }
+.home-logo img { border-radius: 20px; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+.home-logo h1 { margin: 10px 0 2px; font-size: 26px; }
+.home-logo p { margin: 0; color: var(--ink-soft); font-size: 14px; }
+
+.field { display: grid; gap: 4px; font-size: 13px; color: var(--ink-soft); }
+input {
+  font: inherit; font-size: 17px; color: var(--ink);
+  background: rgba(0,0,0,.28);
+  border: 1px solid rgba(255,255,255,.18);
+  border-radius: 12px;
+  padding: 12px 14px;
+  width: 100%;
+}
+input:focus { outline: 2px solid var(--gold); outline-offset: 1px; }
+
+.big-btn {
+  width: 100%;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,.16);
+  background: rgba(0,0,0,.25);
+  font-weight: 700; font-size: 16px;
+}
+.big-btn.primary { background: var(--gold); color: #2a2100; border-color: var(--gold); }
+.big-btn:disabled { opacity: .45; }
+
+.join-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.join-row input { text-transform: uppercase; letter-spacing: .25em; text-align: center; font-weight: 800; }
+.join-row .big-btn { width: auto; padding: 0 22px; }
+
+.home-msg { min-height: 20px; margin: 0; text-align: center; color: var(--gold); font-size: 14px; }
+.link-btn { background: none; border: 0; color: var(--ink-soft); text-decoration: underline; padding: 8px; }
+
+.lobby-head { text-align: center; }
+.lobby-label { margin: 0; color: var(--ink-soft); text-transform: uppercase; letter-spacing: .1em; font-size: 12px; }
+.lobby-code { margin: 0 0 10px; font-size: 44px; font-weight: 900; letter-spacing: .18em; color: var(--gold); }
+.lobby-status { color: var(--gold); font-size: 14px; }
+.lobby-teams { display: grid; gap: 12px; }
+.lobby-team { background: var(--panel); border-radius: 16px; padding: 10px; display: grid; gap: 8px; }
+.lobby-team h3 { margin: 0 4px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-soft); }
+.lobby-seat {
+  display: grid; grid-template-columns: 62px 1fr auto; align-items: center; gap: 8px;
+  padding: 10px; border-radius: 12px; background: rgba(255,255,255,.05);
+  min-height: 52px;
+}
+.lobby-seat.is-me { outline: 2px solid var(--us); }
+.seat-no { font-size: 12px; color: var(--ink-soft); }
+.lobby-seat small { color: var(--ink-soft); }
+.lobby-seat .empty { color: var(--ink-soft); font-style: italic; }
+.lobby-actions { display: flex; gap: 6px; }
+.lobby-actions button {
+  border: 1px solid rgba(255,255,255,.2); background: rgba(0,0,0,.25);
+  border-radius: 10px; padding: 7px 10px; font-size: 13px; font-weight: 600; white-space: nowrap;
+}
+.hint { text-align: center; color: var(--ink-soft); margin: 4px 0; font-size: 14px; }
+.hint.small { font-size: 12px; }
+.off { color: var(--them) !important; }
+
+.net-banner {
+  position: fixed; z-index: 5;
+  top: calc(var(--safe-top) + 54px); left: 50%; transform: translateX(-50%);
+  padding: 6px 14px; border-radius: 999px;
+  background: var(--them); color: #2b0f05; font-weight: 700; font-size: 13px;
+  box-shadow: 0 4px 14px rgba(0,0,0,.35);
+  white-space: nowrap;
+}
+.seat.away { opacity: .55; }
+
 .table {
   height: 100dvh;
   display: grid;
@@ -105,7 +190,8 @@ button { font: inherit; color: inherit; cursor: pointer; touch-action: manipulat
 .team-us .avatar { background: var(--us); }
 .team-them .avatar { background: var(--them); }
 .seat-name { font-weight: 600; font-size: 14px; }
-.seat-name small { display: block; font-size: 10px; font-weight: 500; color: var(--us); margin-top: -2px; }
+.seat-name small { display: block; font-size: 10px; font-weight: 500; color: var(--ink-soft); margin-top: -2px; }
+.team-us .seat-name small:not(.off) { color: var(--us); }
 .seat-count {
   min-width: 20px; padding: 0 6px; border-radius: 10px;
   background: rgba(0,0,0,.35); font-size: 12px; text-align: center;
