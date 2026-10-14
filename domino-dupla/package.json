@@ -1,0 +1,11 @@
+{
+  "name": "domino-dupla",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dominó em dupla (4 jogadores) para iPhone, como web app instalável.",
+  "scripts": {
+    "test": "node --test",
+    "start": "python3 -m http.server 8080"
+  }
+}
